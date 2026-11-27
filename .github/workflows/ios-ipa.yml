@@ -42,6 +42,9 @@ jobs:
           VERSION=${GITHUB_REF_NAME#v}
           sed -i -E "s/^( *)bundleVersion: .*/\1bundleVersion: $VERSION/" ProjectSettings/ProjectSettings.asset
           grep -q "^ *bundleVersion: $VERSION\$" ProjectSettings/ProjectSettings.asset || { echo "::error::bundleVersion not set"; exit 1; }
+          # Fork addition: CFBundleVersion (build number) was left at 0; use the same version string.
+          sed -i -E "s/^( *)iPhone: 0\$/\1iPhone: $VERSION/" ProjectSettings/ProjectSettings.asset
+          grep -q "^ *iPhone: $VERSION\$" ProjectSettings/ProjectSettings.asset || { echo "::error::iOS build number not set"; exit 1; }
 
       # Fork addition: build under our own bundle id (an iOS bundle id belongs to the Apple team that
       # first signed it). Set repo variable IOS_BUNDLE_ID to override the default below. Edited in
@@ -99,11 +102,76 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             archive | tail -30
 
+      # Fork addition (v0.1.1). Unity 6.6 embeds a prebuilt stub, UnityRuntime.framework, that Unity
+      # signed with its macOS "Developer ID Application" certificate (detached files in _CodeSignature)
+      # and that has a build-machine temp path as its install name. A normal Xcode signing pass would
+      # overwrite that signature, but this archive is built with signing off, so it reached the IPA
+      # as-is and iOS rejected it at install (ApplicationVerificationFailed 0xe8008001). Hand every
+      # embedded framework/dylib to the re-signer (Sideloadly etc.) in the same state as the app
+      # binary and UnityFramework: one arm64 slice, no signature, no _CodeSignature, sane metadata.
+      - name: Sanitize embedded frameworks
+        run: |
+          set -euo pipefail
+          APP=$(ls -d build/CardboardXR.xcarchive/Products/Applications/*.app)
+          xattr -cr "$APP"
+          find "$APP" -name .DS_Store -delete
+          shopt -s nullglob
+          for FW in "$APP"/Frameworks/*.framework; do
+            NAME=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$FW/Info.plist")
+            BIN="$FW/$NAME"
+            echo "== $(basename "$FW") ($NAME)"
+            rm -rf "$FW/_CodeSignature"
+            if [[ "$(lipo -info "$BIN")" == Architectures\ in\ the\ fat\ file* ]]; then
+              lipo "$BIN" -thin arm64 -output "$BIN.thin" && mv "$BIN.thin" "$BIN"
+              echo "   thinned fat binary to arm64"
+            fi
+            codesign --remove-signature "$BIN" 2>/dev/null || true
+            WANT="@rpath/$(basename "$FW")/$NAME"
+            HAVE=$(otool -D "$BIN" | tail -n +2)
+            if [ "$HAVE" != "$WANT" ]; then
+              install_name_tool -id "$WANT" "$BIN"
+              echo "   install name: $HAVE -> $WANT"
+            fi
+            PL="$FW/Info.plist"
+            /usr/libexec/PlistBuddy -c 'Print :CFBundleSupportedPlatforms' "$PL" >/dev/null 2>&1 \
+              || /usr/libexec/PlistBuddy -c 'Add :CFBundleSupportedPlatforms array' -c 'Add :CFBundleSupportedPlatforms:0 string iPhoneOS' "$PL"
+            /usr/libexec/PlistBuddy -c 'Print :CFBundleInfoDictionaryVersion' "$PL" >/dev/null 2>&1 \
+              || /usr/libexec/PlistBuddy -c 'Add :CFBundleInfoDictionaryVersion string 6.0' "$PL"
+            plutil -convert binary1 "$PL"
+          done
+          for D in "$APP"/Frameworks/*.dylib; do
+            codesign --remove-signature "$D" 2>/dev/null || true
+          done
+
+      # Fail the build if anything is still pre-signed or a framework is malformed.
+      - name: Verify app bundle
+        run: |
+          set -euo pipefail
+          APP=$(ls -d build/CardboardXR.xcarchive/Products/Applications/*.app)
+          LEFT=$(find "$APP" -name _CodeSignature -o -name embedded.mobileprovision)
+          [ -z "$LEFT" ] || { echo "::error::leftover signing files: $LEFT"; exit 1; }
+          bad=0
+          while IFS= read -r -d '' F; do
+            if [[ "$(file -b "$F")" == *Mach-O* ]]; then
+              info=$(lipo -info "$F")
+              if codesign -d "$F" >/dev/null 2>&1; then echo "::error::still signed: $F"; bad=1; fi
+              [[ "$info" == *arm64* ]] || { echo "::error::no arm64 slice: $F"; bad=1; }
+              echo "OK  ${F#$APP/}  [$info]"
+            fi
+          done < <(find "$APP" -type f -perm -u+x -print0)
+          for FW in "$APP"/Frameworks/*.framework; do
+            NAME=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$FW/Info.plist")
+            ID=$(otool -D "$FW/$NAME" | tail -n +2)
+            [ "$ID" = "@rpath/$(basename "$FW")/$NAME" ] || { echo "::error::bad install name $ID"; bad=1; }
+          done
+          exit $bad
+
       - name: Package .ipa
         run: |
           mkdir -p Payload
           cp -R build/CardboardXR.xcarchive/Products/Applications/*.app Payload/
           zip -qry CardboardXR-${GITHUB_REF_NAME}.ipa Payload
+          shasum -a 256 CardboardXR-${GITHUB_REF_NAME}.ipa
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

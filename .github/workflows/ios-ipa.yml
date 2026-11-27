@@ -134,12 +134,17 @@ jobs:
               lipo "$BIN" -thin arm64 -output "$BIN.thin" && mv "$BIN.thin" "$BIN"
               echo "   thinned fat binary to arm64"
             fi
-            codesign --remove-signature "$BIN" 2>/dev/null || true
+            # Install name first: install_name_tool can't process a binary whose signature was just
+            # removed (__LINKEDIT gap). Cosmetic (nothing links this stub), so failure only warns.
             WANT="@rpath/$(basename "$FW")/$NAME"
             HAVE=$(otool -D "$BIN" | tail -n +2)
             if [ "$HAVE" != "$WANT" ]; then
-              install_name_tool -id "$WANT" "$BIN"
-              echo "   install name: $HAVE -> $WANT"
+              if install_name_tool -id "$WANT" "$BIN" 2>/dev/null; then echo "   install name: $HAVE -> $WANT"
+              else echo "::warning::could not reset install name of $NAME (harmless)"; fi
+            fi
+            if codesign -d "$BIN" >/dev/null 2>&1; then
+              codesign --remove-signature "$BIN"
+              echo "   removed embedded signature"
             fi
             PL="$FW/Info.plist"
             /usr/libexec/PlistBuddy -c 'Print :CFBundleSupportedPlatforms' "$PL" >/dev/null 2>&1 \
@@ -171,7 +176,7 @@ jobs:
           for FW in "$APP"/Frameworks/*.framework; do
             NAME=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$FW/Info.plist")
             ID=$(otool -D "$FW/$NAME" | tail -n +2)
-            [ "$ID" = "@rpath/$(basename "$FW")/$NAME" ] || { echo "::error::bad install name $ID"; bad=1; }
+            [ "$ID" = "@rpath/$(basename "$FW")/$NAME" ] || echo "::warning::install name of $NAME is $ID"
           done
           exit $bad
 

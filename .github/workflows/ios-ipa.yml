@@ -13,6 +13,11 @@ on:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'App version for a manual build, e.g. 0.1.1 (blank = leave as in the project)'
+        required: false
+        default: ''
 
 # Fork hardening: the token is read-only unless a job asks for more (only the release step does).
 permissions:
@@ -36,10 +41,14 @@ jobs:
       # game-ci runs Unity in Docker and only passes its own env vars in, so write the version into
       # ProjectSettings directly. The checkout is thrown away after the run; the tag pattern above
       # guarantees three numbers.
+      # Fork addition: a manual run can pass a version (validated; passed via env, never interpolated).
       - name: Set version from tag
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || inputs.version != ''
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
+          if [ "$GITHUB_REF_TYPE" = tag ]; then VERSION=${GITHUB_REF_NAME#v}; else VERSION=$INPUT_VERSION; fi
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version must look like 1.2.3"; exit 1; }
           sed -i -E "s/^( *)bundleVersion: .*/\1bundleVersion: $VERSION/" ProjectSettings/ProjectSettings.asset
           grep -q "^ *bundleVersion: $VERSION\$" ProjectSettings/ProjectSettings.asset || { echo "::error::bundleVersion not set"; exit 1; }
           # Fork addition: CFBundleVersion (build number) was left at 0; use the same version string.
@@ -167,11 +176,15 @@ jobs:
           exit $bad
 
       - name: Package .ipa
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
+          LABEL=$GITHUB_REF_NAME
+          if [ "$GITHUB_REF_TYPE" != tag ] && [[ "$INPUT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then LABEL=v$INPUT_VERSION; fi
           mkdir -p Payload
           cp -R build/CardboardXR.xcarchive/Products/Applications/*.app Payload/
-          zip -qry CardboardXR-${GITHUB_REF_NAME}.ipa Payload
-          shasum -a 256 CardboardXR-${GITHUB_REF_NAME}.ipa
+          zip -qry "CardboardXR-$LABEL.ipa" Payload
+          shasum -a 256 "CardboardXR-$LABEL.ipa"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

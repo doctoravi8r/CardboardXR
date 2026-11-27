@@ -14,11 +14,24 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+'
   workflow_dispatch:
 
+# Fork hardening: the token is read-only unless a job asks for more (only the release step does).
+permissions:
+  contents: read
+
+# One build per ref at a time; a newer run replaces a queued/older one.
+concurrency:
+  group: ios-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   unity-export:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false  # don't leave the token in .git/config for later steps
+          fetch-depth: 0  # game-ci derives a version from history; avoids an unshallow fetch later
 
       # game-ci runs Unity in Docker and only passes its own env vars in, so write the version into
       # ProjectSettings directly. The checkout is thrown away after the run; the tag pattern above
@@ -65,10 +78,12 @@ jobs:
           name: xcode-project
           path: Builds/iOS
           if-no-files-found: error
+          retention-days: 3  # intermediate only; public-repo artifacts are visible to signed-in users
 
   ipa:
     needs: unity-export
     runs-on: macos-15
+    timeout-minutes: 60
     permissions:
       contents: write  # needed to add the .ipa to the release
     steps:

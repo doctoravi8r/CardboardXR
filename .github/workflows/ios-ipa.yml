@@ -30,6 +30,17 @@ jobs:
           sed -i -E "s/^( *)bundleVersion: .*/\1bundleVersion: $VERSION/" ProjectSettings/ProjectSettings.asset
           grep -q "^ *bundleVersion: $VERSION\$" ProjectSettings/ProjectSettings.asset || { echo "::error::bundleVersion not set"; exit 1; }
 
+      # Fork addition: build under our own bundle id (an iOS bundle id belongs to the Apple team that
+      # first signed it). Set repo variable IOS_BUNDLE_ID to override the default below. Edited in
+      # ProjectSettings for the same reason as the version above: env vars don't reach the container.
+      - name: Set bundle id
+        env:
+          BUNDLE_ID: ${{ vars.IOS_BUNDLE_ID || 'com.malekalali.cardboardxr' }}
+        run: |
+          sed -i -E "s/^( *)iPhone: com\.brenpoly\.cardboardxr\$/\1iPhone: $BUNDLE_ID/" ProjectSettings/ProjectSettings.asset
+          grep -q "^ *iPhone: $BUNDLE_ID\$" ProjectSettings/ProjectSettings.asset || { echo "::error::bundle id not set"; exit 1; }
+          echo "Bundle id: $BUNDLE_ID"
+
       - uses: game-ci/unity-builder@4423ee75828dff56037d1d1cfdac6b68e3a6ba00 # v4
         env:
           UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
